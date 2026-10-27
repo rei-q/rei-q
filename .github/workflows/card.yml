@@ -1,0 +1,62 @@
+name: card
+
+# Rebuilds the profile card every 6 hours and publishes the images to the `output` branch,
+# so main keeps a single clean history.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: card
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch contributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api graphql \
+            -f query='query($u:String!){user(login:$u){contributionsCollection{contributionCalendar{weeks{contributionDays{contributionCount date}}}}}}' \
+            -f u="${{ github.repository_owner }}" > "$RUNNER_TEMP/cal.json"
+
+      - name: Fetch data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.DATA_REPO }}
+          ssh-key: ${{ secrets.DATA_KEY }}
+          path: .data
+          sparse-checkout: usage
+          persist-credentials: false
+
+      - name: Build
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          node scripts/card.mjs "$RUNNER_TEMP/cal.json" "$RUNNER_TEMP/out" .data/usage
+
+      - name: Publish to output branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          pub="$RUNNER_TEMP/pub"
+          if git ls-remote --exit-code --heads origin output >/dev/null; then
+            git fetch --depth 1 origin output
+            git worktree add -B output "$pub" FETCH_HEAD
+          else
+            git worktree add --detach "$pub"
+            git -C "$pub" switch --orphan output
+          fi
+          cp "$RUNNER_TEMP/out/card-dark.svg" "$RUNNER_TEMP/out/card-light.svg" "$pub/"
+          git -C "$pub" add card-dark.svg card-light.svg
+          if git -C "$pub" diff --cached --quiet; then echo "No change."; exit 0; fi
+          git -C "$pub" commit -m "card"
+          git -C "$pub" push origin output
